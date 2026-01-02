@@ -1,73 +1,109 @@
-import { GoogleGenAI, Modality } from "@google/genai";
 
-const apiKey = process.env.API_KEY || '';
-const ai = new GoogleGenAI({ apiKey });
+// This service now handles Native Browser TTS instead of Gemini API
+// We keep the file name to avoid breaking imports in other files if they existed, 
+// though we will update AudioPlayer.tsx to use these new functions.
 
-export const base64ToUint8Array = (base64: string): Uint8Array => {
-  const binaryString = window.atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+let voicesLoaded = false;
+let availableVoices: SpeechSynthesisVoice[] = [];
+
+// Initialize voices
+const loadVoices = () => {
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    availableVoices = window.speechSynthesis.getVoices();
+    voicesLoaded = true;
   }
-  return bytes;
 };
 
-export const pcmToAudioBuffer = (
-  data: Uint8Array,
-  ctx: AudioContext,
-  sampleRate: number = 24000
-): AudioBuffer => {
-  const numChannels = 1;
-  // Ensure we are reading 16-bit integers. 
-  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
-  const frameCount = dataInt16.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
-
-  for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
-    for (let i = 0; i < frameCount; i++) {
-      // Normalize Int16 to Float32 [-1.0, 1.0]
-      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
-    }
+if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  loadVoices();
+  if (window.speechSynthesis.onvoiceschanged !== undefined) {
+    window.speechSynthesis.onvoiceschanged = loadVoices;
   }
-  return buffer;
+}
+
+export const stopNativeTts = () => {
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    window.speechSynthesis.cancel();
+  }
 };
 
-export const generateSpeech = async (text: string, speakerType: string): Promise<string> => {
-  // Map our internal speaker types to Gemini Voice names
-  // Zephyr: deep/calm (Josh/Intro)
-  // Puck: Female conversation
-  // Fenrir: Male conversation
-  // Charon: Academic
-  
-  let voiceName = 'Zephyr';
-  if (speakerType === 'female') voiceName = 'Puck';
-  if (speakerType === 'male') voiceName = 'Fenrir';
-  if (speakerType === 'lecturer') voiceName = 'Charon';
-  if (speakerType === 'duo') voiceName = 'Kore'; 
-  
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text: text }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: voiceName },
-          },
-        },
-      },
-    });
-
-    const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!audioData) {
-      throw new Error("No audio data returned from Gemini API");
-    }
-    return audioData;
-  } catch (error) {
-    console.error("TTS Generation Error:", error);
-    throw error;
+export const playNativeTts = (
+  text: string, 
+  speakerType: string, 
+  onStart: () => void,
+  onEnd: () => void
+) => {
+  if (!('speechSynthesis' in window)) {
+    console.error("TTS not supported");
+    onEnd();
+    return;
   }
+
+  // Cancel any playing audio
+  window.speechSynthesis.cancel();
+
+  // Retry loading voices if empty (Chrome sometimes needs this)
+  if (availableVoices.length === 0) {
+    availableVoices = window.speechSynthesis.getVoices();
+  }
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 0.9; // Slightly slower for better comprehension in a test setting
+  utterance.pitch = 1.0;
+
+  // VOICE SELECTION LOGIC
+  // Priority: 
+  // 1. "Natural" voices (Edge/Azure)
+  // 2. "Google US English"
+  // 3. Any "en-US"
+  
+  // Filter for US English first
+  const usVoices = availableVoices.filter(v => v.lang === 'en-US');
+  const pool = usVoices.length > 0 ? usVoices : availableVoices;
+
+  let selectedVoice: SpeechSynthesisVoice | undefined;
+
+  // Helper to find voice by keyword
+  const findVoice = (keywords: string[]) => {
+    return pool.find(v => keywords.some(k => v.name.toLowerCase().includes(k.toLowerCase())));
+  };
+
+  if (speakerType === 'female') {
+    // Look for Aria (Edge Natural), Zira, Google US English, or just "Female"
+    selectedVoice = findVoice(['Aria', 'Natural', 'Zira', 'Google US English', 'female']);
+  } else if (speakerType === 'male') {
+    // Look for Guy (Edge Natural), David, or "Male"
+    selectedVoice = findVoice(['Guy', 'Natural', 'David', 'male']);
+  } else if (speakerType === 'lecturer') {
+    // Authoritative voice - maybe Roger or Christopher or Guy
+    selectedVoice = findVoice(['Guy', 'Christopher', 'Roger', 'Natural', 'male']);
+  } else if (speakerType === 'duo') {
+    // For Duo, default to a clear Natural voice
+    selectedVoice = findVoice(['Aria', 'Natural', 'Google US English']);
+  }
+
+  // Fallback
+  if (!selectedVoice) {
+    selectedVoice = pool[0];
+  }
+
+  if (selectedVoice) {
+    utterance.voice = selectedVoice;
+    // console.log("Using voice:", selectedVoice.name); 
+  }
+
+  utterance.onstart = () => {
+    onStart();
+  };
+
+  utterance.onend = () => {
+    onEnd();
+  };
+
+  utterance.onerror = (e) => {
+    console.error("TTS Error", e);
+    onEnd();
+  };
+
+  window.speechSynthesis.speak(utterance);
 };

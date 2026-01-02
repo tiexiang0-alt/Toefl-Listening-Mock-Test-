@@ -5,7 +5,7 @@ export interface Option {
 
 export interface Question {
   id: number;
-  questionText?: string; // Sometimes the question is spoken, not written, but here we provide text for the UI
+  questionText?: string;
   options: Option[];
   correctAnswerIndex: number; // 0-3
   explanation: string;
@@ -21,9 +21,20 @@ export interface TestSegment {
   imageUrl?: string; // For visual context
 }
 
+export interface Module {
+  id: 'module-1' | 'module-2-hard' | 'module-2-easy';
+  label: string;
+  description: string;
+  timeLimitSeconds: number;
+  segments: TestSegment[];
+}
+
 export interface TestState {
+  currentModuleId: string;
   currentSegmentIndex: number;
   answers: Record<number, number>; // questionId -> selectedOptionIndex
+  moduleScores: Record<string, number>; // moduleId -> score
   isCompleted: boolean;
-  score: number;
+  pathTaken: 'hard' | 'easy' | null;
+  startTime: number;
 }
